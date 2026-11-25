@@ -75,4 +75,81 @@ describe("vibe-app-server live smoke (skips when the binary is absent)", () => {
       ),
     ),
   );
+
+  /**
+   * The goal lifecycle against a real server, never `status: "active"`: an active
+   * goal starts real continuation turns, so the smoke test manages it paused only.
+   */
+  it.effect("goal get, set, edit and clear on an interactive ephemeral session", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+        const child = yield* spawner
+          .spawn(ChildProcess.make("vibe-app-server", [], { cwd: process.cwd() }))
+          .pipe(
+            Effect.catchCause((cause) =>
+              Effect.fail(
+                new VibeError.VibeAppServerProtocolError({
+                  detail: `skip: vibe-app-server is not installed (${String(Cause.squash(cause))})`,
+                  cause,
+                }),
+              ),
+            ),
+          );
+        const client = Context.get(
+          yield* Layer.build(VibeClient.layerChildProcess(child)),
+          VibeClient.VibeAppServerClient,
+        );
+
+        yield* client.initialize({ clientName: "t3-test", clientVersion: "0.0.0" });
+        yield* client.initialized();
+
+        // Goals need an interactive session; headless data sessions refute even goal/get.
+        const started = yield* client.sessionStart({
+          kind: "ephemeral",
+          agentConfig: { cwd: process.cwd(), headless: false, trustWorkspace: false },
+        });
+        const sessionId = started.state.session.id;
+        expect(started.state.session.goal).toBeUndefined();
+
+        expect(yield* client.goalGet(sessionId)).toBe(null);
+
+        const created = yield* client.goalSet({
+          sessionId,
+          objective: "Live smoke test goal, never resumed",
+          status: "paused",
+        });
+        expect(created.status).toBe("paused");
+        expect(created.objective).toBe("Live smoke test goal, never resumed");
+        expect(created.revision).toBe(1);
+
+        const edited = yield* client.goalSet({
+          sessionId,
+          expectedGoalId: created.goalId,
+          objective: "Live smoke test goal, edited",
+        });
+        expect(edited.objective).toBe("Live smoke test goal, edited");
+        expect(edited.objectiveRevision).toBeGreaterThan(created.objectiveRevision);
+
+        const read = yield* client.goalGet(sessionId);
+        expect(read?.goalId).toBe(created.goalId);
+
+        expect(
+          yield* client.goalClear({ sessionId, expectedGoalId: read?.goalId ?? created.goalId }),
+        ).toBe(true);
+        expect(yield* client.goalGet(sessionId)).toBe(null);
+
+        yield* client.sessionDelete(sessionId);
+      }).pipe(
+        Effect.catchCause((cause) => {
+          const squashed = Cause.squash(cause);
+          if (isProtocolError(squashed) && squashed.detail.startsWith("skip:")) {
+            return Effect.logWarning(squashed.detail);
+          }
+          return Effect.failCause(cause);
+        }),
+        Effect.provide(NodeServices.layer),
+      ),
+    ),
+  );
 });

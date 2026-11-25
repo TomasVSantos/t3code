@@ -35,6 +35,36 @@ const PublicSessionWorktree = Schema.Struct({
   path: Schema.String,
 });
 
+export const PublicSessionGoalStatus = Schema.Literals([
+  "active",
+  "paused",
+  "blocked",
+  "complete",
+  "budget_limited",
+  "usage_limited",
+]);
+export type PublicSessionGoalStatus = typeof PublicSessionGoalStatus.Type;
+
+/**
+ * A root session's durable goal. Absent from `PublicSession` while it has none,
+ * and only on interactive sessions: headless (`vibe -p`, `vibe-acp`) sessions
+ * have no goal.
+ */
+export const PublicSessionGoal = Schema.Struct({
+  goalId: Schema.String,
+  revision: Schema.Number,
+  objectiveRevision: Schema.Number,
+  objective: Schema.String,
+  status: PublicSessionGoalStatus,
+  statusReason: Schema.optional(Schema.NullOr(Schema.String)),
+  tokenBudget: Schema.optional(Schema.NullOr(Schema.Number)),
+  tokensUsed: Schema.optional(Schema.Number),
+  timeUsedSeconds: Schema.optional(Schema.Number),
+  createdAt: Schema.Number,
+  updatedAt: Schema.Number,
+});
+export type PublicSessionGoal = typeof PublicSessionGoal.Type;
+
 export const PublicSession = Schema.Struct({
   id: Schema.String,
   rootSessionId: Schema.optional(Schema.NullOr(Schema.String)),
@@ -51,6 +81,7 @@ export const PublicSession = Schema.Struct({
   reasoningEffort: Schema.optional(Schema.NullOr(Schema.String)),
   tokenUsage: Schema.optional(Schema.NullOr(TokenUsage)),
   contextUsage: Schema.optional(Schema.NullOr(TokenUsage)),
+  goal: Schema.optional(PublicSessionGoal),
 });
 export type PublicSession = typeof PublicSession.Type;
 
@@ -190,6 +221,10 @@ export const ModelWriteResult = Schema.Struct({
   failures: Schema.optional(Schema.Array(Schema.String)),
 });
 
+const GoalGetResult = Schema.Struct({ goal: Schema.NullOr(PublicSessionGoal) });
+const GoalSetResult = Schema.Struct({ goal: PublicSessionGoal });
+const GoalClearResult = Schema.Struct({ cleared: Schema.Boolean });
+
 export interface VibeAppServerClientOptions {
   readonly logIncoming?: boolean;
   readonly logOutgoing?: boolean;
@@ -302,6 +337,25 @@ export class VibeAppServerClient extends Context.Service<
       { readonly items: ReadonlyArray<PublicTurn>; readonly nextCursor: string | null },
       VibeError.VibeAppServerError
     >;
+    readonly goalGet: (
+      sessionId: string,
+    ) => Effect.Effect<PublicSessionGoal | null, VibeError.VibeAppServerError>;
+    readonly goalSet: (input: {
+      sessionId: string;
+      idempotencyKey?: string | undefined;
+      expectedGoalId?: string | undefined;
+      expectedRevision?: number | undefined;
+      replace?: boolean;
+      objective?: string | undefined;
+      status?: "active" | "paused" | undefined;
+      // An explicit null removes the goal's budget; an omitted one keeps it.
+      tokenBudget?: number | null | undefined;
+    }) => Effect.Effect<PublicSessionGoal, VibeError.VibeAppServerError>;
+    readonly goalClear: (input: {
+      sessionId: string;
+      idempotencyKey?: string | undefined;
+      expectedGoalId: string;
+    }) => Effect.Effect<boolean, VibeError.VibeAppServerError>;
     readonly eventsRead: (input: {
       afterEventId?: number | null | undefined;
       sessionIds?: ReadonlyArray<string>;
@@ -537,6 +591,30 @@ export const make = Effect.fn("@t3tools/vibe-app-server/VibeAppServerClient.make
         ),
       );
       return { items, nextCursor: pageResult.nextCursor ?? null };
+    }),
+    goalGet: Effect.fn("VibeAppServerClient.goalGet")(function* (sessionId) {
+      return yield* typed("goal/get", GoalGetResult, { sessionId }).pipe(
+        Effect.map((result) => result.goal),
+      );
+    }),
+    goalSet: Effect.fn("VibeAppServerClient.goalSet")(function* (input) {
+      return yield* typed("goal/set", GoalSetResult, {
+        sessionId: input.sessionId,
+        ...(input.idempotencyKey !== undefined ? { idempotencyKey: input.idempotencyKey } : {}),
+        ...(input.expectedGoalId !== undefined ? { expectedGoalId: input.expectedGoalId } : {}),
+        ...(input.expectedRevision !== undefined ? { expectedRevision: input.expectedRevision } : {}),
+        ...(input.replace !== undefined ? { replace: input.replace } : {}),
+        ...(input.objective !== undefined ? { objective: input.objective } : {}),
+        ...(input.status !== undefined ? { status: input.status } : {}),
+        ...(input.tokenBudget !== undefined ? { tokenBudget: input.tokenBudget } : {}),
+      }).pipe(Effect.map((result) => result.goal));
+    }),
+    goalClear: Effect.fn("VibeAppServerClient.goalClear")(function* (input) {
+      return yield* typed("goal/clear", GoalClearResult, {
+        sessionId: input.sessionId,
+        expectedGoalId: input.expectedGoalId,
+        ...(input.idempotencyKey !== undefined ? { idempotencyKey: input.idempotencyKey } : {}),
+      }).pipe(Effect.map((result) => result.cleared));
     }),
     eventsRead: Effect.fn("VibeAppServerClient.eventsRead")(function* (input) {
       const filters: Record<string, unknown> = {};
